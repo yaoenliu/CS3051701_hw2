@@ -1,31 +1,27 @@
 #include <Arduino.h>
-#include <Arduino_FreeRTOS.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include "Vector.h"
+#include "AdminId.h"
 
-#define adminID "testID"
-
-#define LED_RED 2
-#define LED_GREEN 3
+#define LED_RED A4
+#define LED_GREEN A2
 #define RST_PIN 9
 #define SS_PIN 10
 
-// task handlers
-TaskHandle_t checkAuthorizationHandler = NULL;
-TaskHandle_t serialSectionHandler = NULL;
+#define miximumAuthorizedID 100
 
 // task functions
-void checkAuthorization(void *pvParameters);
-void serialSection(void *pvParameters);
+void checkAuthorization();
+void serialSection();
 
 // read modules
 String sRead(); // serial read
-int sReadInt(); // serial read int
 String rRead(); // rfid read
 
 // authorized ID
-Vector<String> authorizedID;
+String authorizedID[miximumAuthorizedID];
+Vector<String> authorizedIDVector;
 
 // MFRC522 instance
 MFRC522 rfid(SS_PIN, RST_PIN);
@@ -37,35 +33,35 @@ void setup()
   // initialize led pin
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
+  pinMode(A5, OUTPUT);
+  pinMode(A3, OUTPUT);
+  digitalWrite(A5, LOW);
+  digitalWrite(A3, LOW);
   // initialize rfid
   SPI.begin();
   rfid.PCD_Init();
-
-  authorizedID.push_back(adminID);
-
-  // create tasks
-  xTaskCreate(checkAuthorization, "check", 128, NULL, 1, &checkAuthorizationHandler);
-  xTaskCreate(serialSection, "serial", 128, NULL, 1, &serialSectionHandler);
-
-  // start tasks
-  vTaskSuspend(serialSectionHandler);
-  vTaskStartScheduler();
+  // initialize authorized ID vector
+  authorizedIDVector.setStorage(authorizedID);
+  authorizedIDVector.push_back(adminID);
+  // print system ready
+  Serial.println("[System ready]");
 }
 
 void loop()
 {
+  checkAuthorization();
 }
 
-void checkAuthorization(void *pvParameters)
+void checkAuthorization()
 {
-  (void)pvParameters;
   while (1)
   {
+    Serial.println("[Place your card]");
     String input = rRead();
     bool authorized = false;
-    for (uint16_t i = 0; i < authorizedID.size(); i++)
+    for (uint16_t i = 0; i < authorizedIDVector.size(); i++)
     {
-      if (input == authorizedID[i])
+      if (input == authorizedIDVector[i])
       {
         authorized = true;
         break;
@@ -77,107 +73,130 @@ void checkAuthorization(void *pvParameters)
     }
     else
     {
-      Serial.println("Access denied");
+      Serial.println("[Access denied]");
       digitalWrite(LED_RED, HIGH);
       delay(1000);
       digitalWrite(LED_RED, LOW);
     }
   }
-  Serial.println("Access granted");
-  vTaskResume(serialSectionHandler);
+  Serial.println("[Access granted]");
   digitalWrite(LED_GREEN, HIGH);
   delay(1000);
   digitalWrite(LED_GREEN, LOW);
-  vTaskSuspend(checkAuthorizationHandler);
+  serialSection();
 }
 
-void serialSection(void *pvParameters)
+void serialSection()
 {
-  (void)pvParameters;
-
+  Serial.println("[Enter admin mode]");
+  Serial.println("[Commands: ADD, LIST, REMOVE[index]]");
   while (1)
   {
     String input = sRead();
     if (input == "ADD")
     {
+      if (authorizedIDVector.full())
+      {
+        Serial.println("[The authorized ID list is full]");
+        break;
+      }
+      Serial.println("[Place your card]");
       input = rRead();
       bool exists = false;
-      for (uint16_t i = 0; i < authorizedID.size(); i++)
+      for (uint16_t i = 0; i < authorizedIDVector.size(); i++)
       {
         if (input == authorizedID[i])
         {
-          Serial.println("ID already exists");
+          Serial.print("[ID: ");
+          Serial.print(input);
+          Serial.println(" already exists]");
           exists = true;
           break;
         }
       }
       if (!exists)
-        authorizedID.push_back(input);
+      {
+        authorizedIDVector.push_back(input);
+        Serial.print("[ID: ");
+        Serial.print(input);
+        Serial.println(" added]");
+      }
+
+      break;
     }
 
     if (input == "LIST")
     {
-      for (uint16_t i = 0; i < authorizedID.size(); i++)
+      for (uint16_t i = 0; i < authorizedIDVector.size(); i++)
       {
-        Serial.print(i + ": ");
+        Serial.print(i + 1);
+        Serial.print(": ");
         Serial.println(authorizedID[i]);
       }
+      break;
     }
 
-    if (input == "REMOVE")
+    if (input.startsWith("REMOVE[") && input.endsWith("]"))
     {
-      uint16_t index = sReadInt();
-      if (index < authorizedID.size())
+      if (authorizedIDVector.size() == 1)
       {
-        authorizedID.remove(index);
+        Serial.println("[Cannot remove the only ID]");
+        break;
+      }
+      // remove the ID
+      int startIdx = input.indexOf('[') + 1;
+      int endIdx = input.indexOf(']');
+      String indexStr = input.substring(startIdx, endIdx);
+      uint16_t index = indexStr.toInt();
+      if (index - 1 < authorizedIDVector.size() && index > 0)
+      {
+        Serial.print("[ID: ");
+        Serial.print(authorizedID[index - 1]);
+        Serial.print(" at index: ");
+        Serial.print(index);
+        Serial.println(" removed]");
+        authorizedIDVector.remove(index - 1);
       }
       else
       {
-        Serial.println("Invalid index");
+        Serial.print("[Invalid index, input: 1 - ");
+        Serial.print(authorizedIDVector.size());
+        Serial.println(" only]");
       }
-    }
-    // stop this and start checkAuthorization
-    if (false) // will change to design condition, now will always not enter
       break;
+    }
   }
-  vTaskResume(checkAuthorizationHandler);
-  vTaskSuspend(serialSectionHandler);
 }
 
 String sRead()
 {
+  // drop all serial input before reading
+  while (Serial.available())
+  {
+    Serial.read();
+  }
+  // wait for input
+  while (!Serial.available())
+  {
+  }
   String input = "";
-  while (Serial.available() == 0)
-  {
-    vTaskDelay(10);
-  }
-  input = Serial.readString();
-  return input;
-}
-
-int sReadInt()
-{
-  int input = 0;
-  while (Serial.available() == 0)
-  {
-    vTaskDelay(10);
-  }
-  input = Serial.parseInt();
+  input = Serial.readStringUntil('\n');
+  input.trim();
   return input;
 }
 
 String rRead()
 {
   String input = "";
-  while(!rfid.PICC_IsNewCardPresent()||!rfid.PICC_ReadCardSerial())
+  while (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial())
   {
-    vTaskDelay(10);
   }
   for (uint8_t i = 0; i < rfid.uid.size; i++)
   {
     input += String(rfid.uid.uidByte[i], HEX);
-  } 
+  }
   input.toUpperCase();
+  Serial.println("RFID read: " + input);
   rfid.PICC_HaltA();
   return input;
 }
